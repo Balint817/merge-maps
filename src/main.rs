@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use celeste::binel::{parser, writer, BinEl, BinElAttr, BinFile};
-use clap::Parser;
+use clap::{ArgAction, Parser};
 use notify::{recommended_watcher, Event, RecursiveMode, Watcher};
 
 #[derive(Parser, Debug, Clone)]
@@ -22,13 +22,13 @@ struct Args {
     strict_meta: bool,
 
     #[arg(long)]
+    check_overlaps: bool,
+
+    #[arg(long = "no-rename-duplicates", action = ArgAction::SetFalse, default_value_t = true)]
     rename_duplicates: bool,
 
-    #[arg(long)]
+    #[arg(long = "no-merge-filler", action = ArgAction::SetFalse, default_value_t = true)]
     merge_filler: bool,
-
-    #[arg(long)]
-    check_overlaps: bool,
 
     #[arg(long)]
     watch: bool,
