@@ -1,13 +1,16 @@
 use std::collections::HashSet;
 use std::fs;
 use std::io::Cursor;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::channel;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use celeste::binel::{parser, writer, BinEl, BinElAttr, BinFile};
 use clap::Parser;
+use notify::{recommended_watcher, Event, RecursiveMode, Watcher};
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(name = "celeste_bin_merge")]
 #[command(about = "Merge two Celeste map .bin files by combining room definitions")]
 struct Args {
@@ -26,6 +29,9 @@ struct Args {
 
     #[arg(long)]
     check_overlaps: bool,
+
+    #[arg(long)]
+    watch: bool,
 }
 
 fn read_file(path: &PathBuf) -> Result<BinFile> {
@@ -172,9 +178,7 @@ fn first_named_child<'a>(root: &'a BinEl, name: &str) -> Option<&'a BinEl> {
     root.get(name).first()
 }
 
-fn main() -> Result<()> {
-    let args = Args::parse();
-
+fn build_once(args: &Args) -> Result<()> {
     let mut map_a = read_file(&args.map_a)?;
     let map_b = read_file(&args.map_b)?;
 
@@ -204,5 +208,97 @@ fn main() -> Result<()> {
     }
 
     write_file(&args.output, &map_a)?;
+    println!(
+        "[{}] merged {} + {} -> {}",
+        chrono_like_now(),
+        args.map_a.display(),
+        args.map_b.display(),
+        args.output.display()
+    );
     Ok(())
+}
+
+fn chrono_like_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    secs.to_string()
+}
+
+fn path_matches(event: &Event, a: &Path, b: &Path) -> bool {
+    event.paths.iter().any(|p| same_path(p, a) || same_path(p, b))
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(l), Ok(r)) => l == r,
+        _ => left == right,
+    }
+}
+
+fn watch_mode(args: Args) -> Result<()> {
+    build_once(&args)?;
+
+    let (tx, rx) = channel();
+
+    let mut watcher = recommended_watcher(move |res| {
+        let _ = tx.send(res);
+    })
+    .context("failed to create file watcher")?;
+
+    watcher
+        .watch(&args.map_a, RecursiveMode::NonRecursive)
+        .with_context(|| format!("failed to watch {}", args.map_a.display()))?;
+    watcher
+        .watch(&args.map_b, RecursiveMode::NonRecursive)
+        .with_context(|| format!("failed to watch {}", args.map_b.display()))?;
+
+    println!(
+        "watching:\n  A: {}\n  B: {}\n  out: {}",
+        args.map_a.display(),
+        args.map_b.display(),
+        args.output.display()
+    );
+
+    let mut last_build = Instant::now() - Duration::from_secs(10);
+    let debounce = Duration::from_millis(250);
+
+    loop {
+        match rx.recv() {
+            Ok(Ok(event)) => {
+                if !path_matches(&event, &args.map_a, &args.map_b) {
+                    continue;
+                }
+
+                let now = Instant::now();
+                if now.duration_since(last_build) < debounce {
+                    continue;
+                }
+                last_build = now;
+
+                println!("change detected: {:?}", event.kind);
+                if let Err(err) = build_once(&args) {
+                    eprintln!("merge failed: {:#}", err);
+                }
+            }
+            Ok(Err(err)) => {
+                eprintln!("watch error: {:?}", err);
+            }
+            Err(err) => {
+                bail!("watch channel closed: {}", err);
+            }
+        }
+    }
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+
+    if args.watch {
+        watch_mode(args)
+    } else {
+        build_once(&args)
+    }
 }
